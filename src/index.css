@@ -1,0 +1,11 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg: #0A0A0B;
+  --color-card-bg: #141416;
+  --color-accent: #2E66FF;
+  --color-text-p: #FFFFFF;
+  --color-text-s: #8E8E93;
+  --color-border: #2C2C2E;
+  --font-mono: 'Courier New', Courier, monospace;
+}
