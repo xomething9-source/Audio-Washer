@@ -2,7 +2,7 @@ import { audioBufferToWav } from './wavUtils';
 import { audioBufferToMp3 } from './mp3Utils';
 
 function getHardClipperCurve() {
-  const threshold = Math.pow(10, -0.3 / 20); // -0.3 dBTP
+  const threshold = Math.pow(10, -1.0 / 20); // -1.0 dBTP Ceiling for streaming safety
   const size = 8192;
   const curve = new Float32Array(size);
   for (let i = 0; i < size; i++) {
@@ -45,7 +45,14 @@ export class AudioEngine {
   playbackStartTimestamp: number = 0;
 
   onPlayStateChange?: (isPlaying: boolean) => void;
-  onMetricsChange?: (metrics: { lufs: number; plr: number; peak: number }) => void;
+  onMetricsChange?: (metrics: { 
+    lufs: number; 
+    plr: number; 
+    peak: number; 
+    tp: number; 
+    lra: number; 
+    phase: number 
+  }) => void;
   onParamsChange?: (params: { threshold: number; ratio: number; qFactor: number; focusHz: number }) => void;
 
   // Parameters for UI
@@ -84,6 +91,9 @@ export class AudioEngine {
   limiter?: DynamicsCompressorNode;
   finalClipper?: WaveShaperNode;
   measuringAnalyser?: AnalyserNode;
+  phaseAnalyserL?: AnalyserNode;
+  phaseAnalyserR?: AnalyserNode;
+  phaseSplitter?: ChannelSplitterNode;
 
   // Added Phase 2 Variables
   presenceBoostEQ?: BiquadFilterNode;
@@ -101,7 +111,9 @@ export class AudioEngine {
   private intervalId?: number;
   private sumSquaresTotal = 0;
   private maxPeak = 0;
+  private maxTruePeak = 0;
   private framesCount = 0;
+  private shortTermLoudnessHistory: number[] = [];
 
   constructor() {
     this.context = new (window.AudioContext || (window as any).webkitAudioContext)();
@@ -116,6 +128,12 @@ export class AudioEngine {
 
     this.measuringAnalyser = this.context.createAnalyser();
     this.measuringAnalyser.fftSize = 2048;
+
+    this.phaseAnalyserL = this.context.createAnalyser();
+    this.phaseAnalyserR = this.context.createAnalyser();
+    this.phaseAnalyserL.fftSize = 2048;
+    this.phaseAnalyserR.fftSize = 2048;
+    this.phaseSplitter = this.context.createChannelSplitter(2);
 
     this.outDryGain = this.context.createGain();
     this.outWetGain = this.context.createGain();
@@ -303,7 +321,7 @@ export class AudioEngine {
     this.sideInvL.gain.value = -1;
 
     this.limiter = this.context.createDynamicsCompressor();
-    this.limiter.threshold.value = -3.0; // Early limiter to prevent spikes
+    this.limiter.threshold.value = -1.0; // Ceiling target
     this.limiter.ratio.value = 20.0;
     this.limiter.attack.value = 0.002;
     this.limiter.release.value = 0.050;
@@ -366,6 +384,9 @@ export class AudioEngine {
     
     // Measurement split
     this.finalClipper.connect(this.measuringAnalyser);
+    this.finalClipper.connect(this.phaseSplitter!); 
+    this.phaseSplitter!.connect(this.phaseAnalyserL!, 0);
+    this.phaseSplitter!.connect(this.phaseAnalyserR!, 1);
 
     this.playbackStartTimestamp = this.context.currentTime;
     this.source.start(0, this.playbackOffset);
@@ -492,7 +513,7 @@ export class AudioEngine {
 
     // Safe pre-limiter
     const lim = offlineCtx.createDynamicsCompressor();
-    lim.threshold.value = -3.0;
+    lim.threshold.value = -1.0;
     lim.ratio.value = 20.0;
     lim.attack.value = 0.002;
     lim.release.value = 0.050;
@@ -548,11 +569,11 @@ export class AudioEngine {
     const rms = Math.sqrt(sumSquares / (channels * length));
     const rmsDb = rms > 0 ? 20 * Math.log10(rms) : -100;
     
-    // RMS target adjusted: targeting -12 RMS to achieve ~ -10 LUFS (optimal commercial target)
-    const targetLUFS = -12.0;
+    // RMS target adjusted: targeting -12.5 RMS to achieve ~ -12 LUFS (Commercial safe target)
+    const targetLUFS = -12.5; 
     const lufsDiffDb = targetLUFS - rmsDb;
     const scalar = Math.pow(10, lufsDiffDb / 20);
-    const maxVal = Math.pow(10, -0.3 / 20); // strict -0.3 dBTP
+    const maxVal = Math.pow(10, -1.0 / 20); // strict -1.0 dBTP ceiling
     
     // In-place mutation to save massive amounts of memory (prevents mobile crash on long files)
     for (let c = 0; c < channels; c++) {
@@ -581,10 +602,12 @@ export class AudioEngine {
   private startAnalysis() {
     this.sumSquaresTotal = 0;
     this.maxPeak = 0;
+    this.maxTruePeak = 0;
     this.framesCount = 0;
+    this.shortTermLoudnessHistory = [];
 
     const analyze = () => {
-      if (!this.isPlaying || !this.measuringAnalyser) return;
+      if (!this.isPlaying || !this.measuringAnalyser || !this.phaseAnalyserL || !this.phaseAnalyserR) return;
       
       const data = new Float32Array(this.measuringAnalyser.fftSize);
       this.measuringAnalyser.getFloatTimeDomainData(data);
@@ -600,29 +623,69 @@ export class AudioEngine {
       
       this.sumSquaresTotal += (sumSq / data.length);
       if (peak > this.maxPeak) this.maxPeak = peak;
-      this.framesCount++;
       
+      // Approximate True Peak by looking at peak over samples (Web Audio is not 100% correct TP but close enough with 4x oversampling engaged in Clipper)
+      if (peak > this.maxTruePeak) this.maxTruePeak = peak;
+
+      this.framesCount++;
       this.rafId = requestAnimationFrame(analyze);
     };
     analyze();
 
     this.intervalId = window.setInterval(() => {
-      if (this.framesCount === 0) return;
+      if (this.framesCount === 0 || !this.phaseAnalyserL || !this.phaseAnalyserR) return;
       
       const rms = Math.sqrt(this.sumSquaresTotal / this.framesCount);
       const rmsDb = rms > 0 ? 20 * Math.log10(rms) : -100;
       const peakDb = this.maxPeak > 0 ? 20 * Math.log10(this.maxPeak) : -100;
+      const tpDb = this.maxTruePeak > 0 ? 20 * Math.log10(this.maxTruePeak) : -100;
       const plr = peakDb - rmsDb;
 
-      this.onMetricsChange?.({ lufs: rmsDb, plr, peak: peakDb });
+      // Calculate Phase Correlation
+      const dataL = new Float32Array(this.phaseAnalyserL.fftSize);
+      const dataR = new Float32Array(this.phaseAnalyserR.fftSize);
+      this.phaseAnalyserL.getFloatTimeDomainData(dataL);
+      this.phaseAnalyserR.getFloatTimeDomainData(dataR);
+      
+      let dotProduct = 0;
+      let energyL = 0;
+      let energyR = 0;
+      for (let i = 0; i < dataL.length; i++) {
+        dotProduct += dataL[i] * dataR[i];
+        energyL += dataL[i] * dataL[i];
+        energyR += dataR[i] * dataR[i];
+      }
+      const phase = dotProduct / (Math.sqrt(energyL * energyR) || 1);
+
+      // Track history for LRA (approximate)
+      if (rmsDb > -60) {
+        this.shortTermLoudnessHistory.push(rmsDb);
+        if (this.shortTermLoudnessHistory.length > 30) this.shortTermLoudnessHistory.shift();
+      }
+      
+      let lra = 0;
+      if (this.shortTermLoudnessHistory.length > 5) {
+        const sorted = [...this.shortTermLoudnessHistory].sort((a, b) => a - b);
+        lra = sorted[Math.floor(sorted.length * 0.95)] - sorted[Math.floor(sorted.length * 0.1)];
+      }
+
+      this.onMetricsChange?.({ 
+        lufs: rmsDb, 
+        plr, 
+        peak: peakDb, 
+        tp: tpDb, 
+        lra: Math.abs(lra), 
+        phase 
+      });
 
       if (this.autoPlrEnabled && rmsDb > -60) {
         this.runAutoMastering(rmsDb, plr);
       }
 
-      // Reset accumulators for next 1-second window
+      // Reset accumulators for next interval window, but keep TP for a bit longer? No, 1s is fine.
       this.sumSquaresTotal = 0;
       this.maxPeak = 0;
+      this.maxTruePeak = 0;
       this.framesCount = 0;
     }, 1000);
   }
@@ -650,8 +713,8 @@ export class AudioEngine {
       this.onParamsChange?.(this.params);
     }
 
-    // 2. Final Normalizer (-14 LUFS approx)
-    const targetLUFS = -14.0;
+    // 2. Final Normalizer (-12 LUFS target)
+    const targetLUFS = -12.0;
     const lufsDiff = targetLUFS - currentRmsDb;
     
     if (this.makeupGain && Math.abs(lufsDiff) > 0.5) {
@@ -671,6 +734,11 @@ export class AudioEngine {
     if (this.intervalId) clearInterval(this.intervalId);
     this.rafId = undefined;
     this.intervalId = undefined;
+    this.sumSquaresTotal = 0;
+    this.maxPeak = 0;
+    this.maxTruePeak = 0;
+    this.framesCount = 0;
+    this.shortTermLoudnessHistory = [];
   }
 
   dispose() {

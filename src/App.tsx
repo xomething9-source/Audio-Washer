@@ -25,7 +25,14 @@ export default function App() {
     focusHz: 5000,
   });
 
-  const [metrics, setMetrics] = useState({ lufs: -100, plr: 0, peak: -100 });
+  const [metrics, setMetrics] = useState({ 
+    lufs: -100, 
+    plr: 0, 
+    peak: -100, 
+    tp: -100, 
+    lra: 0, 
+    phase: 1.0 
+  });
   const [isExporting, setIsExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
   const [exportFormat, setExportFormat] = useState<'wav' | 'mp3'>('wav');
@@ -97,6 +104,17 @@ export default function App() {
       setChainProgress(0);
     }
   }, [isLoaded, originalFileName]);
+
+  useEffect(() => {
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (isLoaded) {
+        e.preventDefault();
+        e.returnValue = '';
+      }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [isLoaded]);
 
   useEffect(() => {
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
@@ -263,7 +281,7 @@ export default function App() {
     { id: 'preWash', label: 'Pre-Wash', icon: Waves, desc: 'DC Offset & Rumble', tooltip: 'DC Offset과 극저역의 불필요한 울림(로고 잡음 등)을 깨끗하게 정리합니다.' },
     { id: 'smartReverb', label: 'Smart De-reverb', icon: Mic2, desc: 'Tail suppression', tooltip: '사운드의 탁한 잔향과 지저분한 공간감을 스마트하게 억제합니다.' },
     { id: 'aiDeEser', label: 'AI De-esser', icon: Ear, desc: 'Dynamic sibilance control', tooltip: '귀를 찌르는 강한 치찰음(ㅅ, ㅊ, ㅍ 소리)을 부드럽게 제어합니다.' },
-    { id: 'autoPlr', label: 'Auto PLR', icon: Activity, desc: 'Target 9.0 dB & 14 LUFS', tooltip: '상업 음원 타겟(LUFS -10, PLR 9)에 맞춰 최적의 볼륨과 펀치감을 자동으로 확보합니다.' },
+    { id: 'autoPlr', label: 'Auto PLR', icon: Activity, desc: 'Target 9.0 dB & 12 LUFS', tooltip: '상업 음원 타겟(LUFS -12, PLR 9)에 맞춰 최적의 볼륨과 펀치감을 자동으로 확보합니다.' },
   ];
 
   return (
@@ -319,32 +337,40 @@ export default function App() {
         <div className="col-span-3 row-span-2 bg-[#000] border border-[var(--color-border)] rounded-2xl relative overflow-hidden flex flex-col">
           <div className="absolute top-5 left-5 z-10 flex gap-5">
             <div>
-              <div className="font-mono text-[10px] text-[var(--color-text-s)] mb-1">INPUT SOURCE</div>
-              <div className="text-[14px] font-medium">{isLoaded ? 'Internal Bus A-12' : 'No Signal'}</div>
+              <div className="font-mono text-[10px] text-[var(--color-text-s)] mb-1 uppercase tracking-widest">Input Source</div>
+              <div className="text-[14px] font-medium tracking-tight whitespace-nowrap">{isLoaded ? 'Internal Bus A-12' : 'No Signal'}</div>
             </div>
-            {isLoaded && isPlaying && (
-              <>
-                <div className="w-px bg-[var(--color-border)]"></div>
-                <div>
-                  <div className="font-mono text-[10px] text-[var(--color-text-s)] mb-1 uppercase tracking-widest">Curr LUFS</div>
-                  <div className={`text-[14px] font-mono font-medium ${Math.abs(metrics.lufs + 14) < 1 ? 'text-[#34C759]' : 'text-white'}`}>
-                    {metrics.lufs.toFixed(1)} dB
-                  </div>
-                </div>
-                <div className="w-px bg-[var(--color-border)]"></div>
-                <div>
-                  <div className="font-mono text-[10px] text-[var(--color-text-s)] mb-1 uppercase tracking-widest">Curr PLR</div>
-                  <div className={`text-[14px] font-mono font-medium ${Math.abs(metrics.plr - 9) < 0.5 ? 'text-[#34C759]' : 'text-[var(--color-accent)]'}`}>
-                    {metrics.plr.toFixed(1)} dB
-                  </div>
-                </div>
-              </>
-            )}
           </div>
           
-          <div className={`absolute top-5 right-5 z-10 flex p-1 bg-[var(--color-card-bg)]/80 backdrop-blur rounded-lg border border-[var(--color-border)] text-xs ${isExporting ? 'opacity-50 pointer-events-none' : ''}`}>
-            <button disabled={isExporting} onClick={() => setAbToggle('dry')} className={`px-3 py-1.5 rounded-md transition-all ${abMode === 'dry' ? 'bg-red-500/20 text-red-500' : 'text-[var(--color-text-s)] hover:text-white'}`}>Dry</button>
-            <button disabled={isExporting} onClick={() => setAbToggle('wet')} className={`px-3 py-1.5 rounded-md transition-all ${abMode === 'wet' ? 'bg-[var(--color-accent)]/20 text-[var(--color-accent)]' : 'text-[var(--color-text-s)] hover:text-white'}`}>Wet</button>
+          <div className="absolute top-5 right-5 z-10 flex flex-col items-end gap-2">
+            <div className={`flex p-1 bg-[var(--color-card-bg)]/80 backdrop-blur rounded-lg border border-[var(--color-border)] text-xs ${isExporting ? 'opacity-50 pointer-events-none' : ''}`}>
+              <button disabled={isExporting} onClick={() => setAbToggle('dry')} className={`px-3 py-1.5 rounded-md transition-all ${abMode === 'dry' ? 'bg-red-500/20 text-red-500' : 'text-[var(--color-text-s)] hover:text-white'}`}>Dry</button>
+              <button disabled={isExporting} onClick={() => setAbToggle('wet')} className={`px-3 py-1.5 rounded-md transition-all ${abMode === 'wet' ? 'bg-[var(--color-accent)]/20 text-[var(--color-accent)]' : 'text-[var(--color-text-s)] hover:text-white'}`}>Wet</button>
+            </div>
+            
+            {isLoaded && isPlaying && (
+              <div className="flex flex-col gap-1 items-end pr-1">
+                <div className="flex gap-4">
+                  <div className="text-[#34C759] font-mono text-[11px] font-bold tabular-nums drop-shadow-[0_0_8px_rgba(52,199,89,0.4)]">
+                    LUFS {metrics.lufs.toFixed(1)}
+                  </div>
+                  <div className="text-[#34C759] font-mono text-[11px] font-bold tabular-nums drop-shadow-[0_0_8px_rgba(52,199,89,0.4)]">
+                    PLR {metrics.plr.toFixed(1)}
+                  </div>
+                </div>
+                <div className="flex gap-3">
+                  <div className={`font-mono text-[10px] font-bold tabular-nums ${metrics.tp > -1.0 ? 'text-amber-400' : 'text-[#34C759]/70'}`}>
+                    TP {metrics.tp.toFixed(1)}
+                  </div>
+                  <div className="text-[#34C759]/70 font-mono text-[10px] font-bold tabular-nums">
+                    LRA {metrics.lra.toFixed(1)}
+                  </div>
+                  <div className={`font-mono text-[10px] font-bold tabular-nums ${metrics.phase < 0.2 ? 'text-red-400' : 'text-[#34C759]/70'}`}>
+                    PHASE {metrics.phase.toFixed(2)}
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Typography Background */}
@@ -542,7 +568,7 @@ export default function App() {
                 <li><strong className="text-white">Pre-Wash:</strong> 들리지 않는 불필요한 초저역대(잡음)와 중앙선(DC Offset)의 찌그러짐을 상시 제거합니다.</li>
                 <li><strong className="text-white">Smart De-reverb:</strong> 탁하고 지저분한 인공 잔향을 억제해 소리를 선명하게 잡아줍니다.</li>
                 <li><strong className="text-white">AI De-esser:</strong> 치찰음(ㅅ, ㅊ)이 귀를 찌르지 않도록 동적으로 깎아냅니다.</li>
-                <li><strong className="text-white">Auto PLR (선택):</strong> 타겟 음압(LUFS -10)에 맞춰 힘 있게 볼륨 펌핑을 수행합니다.</li>
+                <li><strong className="text-white">Auto PLR (선택):</strong> 타겟 음압(LUFS -12)에 맞춰 힘 있게 볼륨 펌핑을 수행합니다.</li>
               </ul>
 
               <div className="bg-[#2b2518] border border-[#ffb340]/50 p-4 rounded-xl mt-6">
